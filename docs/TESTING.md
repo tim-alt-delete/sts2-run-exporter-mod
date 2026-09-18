@@ -219,6 +219,10 @@ Things that cost time to work out once already.
 - **`dotnet build` failing with thousands of errors** in `sts2-decompiled/`
   means the csproj's `Compile Remove` entries are missing. The Godot SDK globs
   `**/*.cs` and will otherwise compile the entire decompiled game into the mod.
+- **BaseLib changes your `.run` files.** It writes a C# type name as a JSON key
+  onto every card. Anything consuming run history has to tolerate dots in field
+  names; the dashboard needs a build from 2026-09-18 or later, and MongoDB 5.0+.
+  See FINDINGS.md §7.
 - **Sidecars from an older build may hold inflated counts.** Totals are
   cumulative and rewritten on each save, but a run already inflated stays that
   way. Delete the `.cardstats.json` for in-progress test runs after updating.

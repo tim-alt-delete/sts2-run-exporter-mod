@@ -238,3 +238,34 @@ Recorded so they do not get "fixed".
   bypasses `RunManager` entirely and no mod code runs. The flag is accurate.
 - **Saves moving to a `modded/` folder.** Any loaded mod triggers this,
   regardless of `affects_gameplay`. Game behaviour, not ours.
+
+---
+
+## 7. BaseLib changes the on-disk run format
+
+Worth knowing for anything that consumes `.run` files, including the dashboard.
+
+Loading BaseLib — which this mod requires — makes the game write
+
+```json
+"save_dict_List[BaseLib.Abstracts.CardModifier+ModifierSave]": {
+  "BaseLibCardModifiers": []
+}
+```
+
+onto **every card**, in `players[].deck` and in every `card_choices` entry. It
+appeared 140 times in the first modded run recorded, every one an empty
+placeholder, because that run used no card modifiers. The key is a C# generic
+type name, so it contains dots, and `+` for the nested type.
+
+This broke dashboard uploads outright. Its field-name guard rejected any key
+containing a dot, so **every run recorded with this mod installed was refused**,
+with an error the user could do nothing about. Fixed on the dashboard side by
+guarding only what BSON actually rejects — see `dashboard/docs/PLAN.md`, Field
+names.
+
+The general lesson, and the reason this is in FINDINGS rather than a footnote:
+**adding a dependency changed the format of data produced by a system neither we
+nor the dependency owns.** Nothing in the mod writes that key, nothing in the
+mod reads it, and it surfaced two repos away. When adding a mod dependency, ask
+what it does to the game's own save files, not just what API it offers.
