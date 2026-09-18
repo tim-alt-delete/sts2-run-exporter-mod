@@ -437,7 +437,7 @@ happens at render, so a sidecar uploaded mid-run lights up later when its `.run`
 arrives rather than being rejected as an orphan. See `dashboard/docs/PLAN.md`
 phase 6.
 
-### Phase 5 — runtime verification (partly done)
+### Phase 5 — first runtime session: it works, two bugs found (done)
 
 Confirmed in a real game on 2026-09-18: the mod loads, `ModelDb.Init`
 instantiates the tracker, hooks fire, `cardSource` is populated, and the sidecar
@@ -471,15 +471,29 @@ is complete, starting the next one saves at character select
 points at the old run, reopening a finished file and marking it incomplete.
 `RunCardMetrics.IsComplete` makes a completed run refuse further writes.
 
-Still unverified, and needing another session:
+### Phase 6 — the replay fix, confirmed in play (done)
 
-1. replaying a combat no longer inflates `copies_played` (the fix itself)
-2. a finished run writes `"complete": true`
-3. dying records the fatal combat
-4. `unattributed` stays 0 in a pure-attack fight and rises once Poison is used
-5. `cards_drawn` is attributed to the card that drew, not the start-of-turn hand
+Re-tested in a real game on 2026-09-18 after `fix: discard card plays the game
+never committed`. **The replay double-count is gone**: playing cards, using Save
+and Quit mid-combat, resuming and replaying the combat no longer inflates
+`copies_played`.
 
-`docs/TESTING.md` has these as a numbered checklist.
+That confirms the whole state model in [FINDINGS.md](FINDINGS.md), not just one
+fix. Reloading from disk at the start of every combat is the correct discard
+boundary, and `SaveManager.Saved` is the correct commit point — if either were
+wrong, the count would still have doubled.
+
+Still unverified, in rough order of value:
+
+1. a finished run writes `"complete": true`
+2. dying records the fatal combat (the path with no `SaveRun` at all)
+3. `unattributed` stays 0 in a pure-attack fight and rises once Poison is used
+4. `cards_drawn` is attributed to the card that drew, not the start-of-turn hand
+5. anything in multiplayer
+
+Items 1 and 2 share a code path — the `RunManager.OnEnded` postfix — so finishing
+a single run either way exercises both. [TESTING.md](TESTING.md) §4 has these as
+a numbered checklist.
 
 ---
 

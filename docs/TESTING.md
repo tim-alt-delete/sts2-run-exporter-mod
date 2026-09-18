@@ -126,7 +126,9 @@ a Strike-only fight, attribution is broken.
 ### 4.4 Replayed combats do not double-count
 
 This is the regression check for the bug fixed in `fix: discard card plays the
-game never committed`.
+game never committed`. **Confirmed passing 2026-09-18** — re-run it after any
+change to when the mod reads or writes state, because that seam has produced
+every bug so far.
 
 1. Delete the `.cardstats.json` for the run first.
 2. Start a combat, play exactly 2 Strikes.

@@ -8,6 +8,9 @@ of that model, and the rules that fall out of them.
 Read this before changing anything about when the mod reads or writes state.
 Every bug so far has been in that seam, not in the metric collection.
 
+**Status:** the model below was confirmed in a real game on 2026-09-18. The
+replay double-count that motivated it is gone. See §2.1.
+
 ---
 
 ## 1. The central idea: two timelines that must not diverge
@@ -61,7 +64,8 @@ state as committed.**
 
 ### 2.1 Replayed card plays counted twice
 
-*Found by playing. The only one a user would ever notice.*
+*Found by playing. The only one a user would ever notice. **Fixed and confirmed
+fixed in a real game.***
 
 `EnsureRun` reloaded from disk only when `start_time` changed. `start_time` is
 stable for a run's whole life, including across a resume — so resuming never
@@ -76,6 +80,13 @@ different questions, one check.
 **The fix is a reframing, not a patch.** Stop asking "is this a new run?" and
 start asking "what has actually been committed?" — which makes the answer
 unconditional: reload from disk at the start of every combat, always.
+
+**What the confirmation bought.** Re-testing the exact scenario — play cards,
+Save and Quit mid-combat, resume, replay the combat — no longer inflates
+`copies_played`. That validates more than the one fix: it is direct evidence
+that combat start is the right discard boundary and that `SaveManager.Saved` is
+the right commit point. Had either been wrong, the count would still have
+doubled. The model in §1 can now be treated as established rather than inferred.
 
 ### 2.2 `complete` was never `true`
 
@@ -161,6 +172,12 @@ This is not a gap to be closed by writing more tests here. It is a property of
 modding a closed-source game with no headless mode, and the right response is to
 keep the runtime checklist short, specific, and actually run after each change.
 
+**This played out exactly as described.** The automated checks passed before the
+bugs existed, while the bugs existed, and after they were fixed — they never
+moved. Both the discovery of 2.1 and the confirmation of its fix came from a
+human playing the game and reporting what happened. Budget for that round trip;
+it is not optional, and it is the only step that has ever changed the answer.
+
 ### A note on how bug 2.1 got diagnosed
 
 The user reported the symptom and, when given an explanation, pushed back:
@@ -188,8 +205,10 @@ Ranked by likelihood.
    with no dealer and no card source" bucket will catch another player's Poison.
    Untested; nobody has run this in multiplayer.
 2. **An unknown `SaveRun` call site during combat.** The whole commit-in-lockstep
-   design assumes there is none. Four are known and none are in combat. If
-   inflation ever reappears after the fix, check this first.
+   design assumes there is none. Four are known and none are in combat. One
+   replay test has now passed, which is evidence for the assumption but not
+   proof — a call site on a path that test did not cross would still be
+   invisible. If inflation ever reappears, check this first.
 3. **Powers and status effects.** The largest *known* gap, but it under-reports
    rather than corrupting — see PLAN.md, Future work.
 4. **Card plays that never close.** `CardModel.cs` returns early when the owner
