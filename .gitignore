@@ -1,0 +1,20 @@
+.godot/
+bin/
+/android/
+.git/
+.idea/
+.vs/
+publish/
+Properties/
+packages/
+.editorconfig
+*.user
+Directory.Build.props
+obj/
+
+# Mega Crit's code, not ours to redistribute. Both are reference material a
+# developer supplies locally: sts2-decompiled/ to read, lib/ to compile against.
+# DataExporter.csproj excludes them from the build, since the SDK globs **/*.cs
+# and would otherwise compile the whole decompiled game into the mod.
+sts2-decompiled/
+lib/
