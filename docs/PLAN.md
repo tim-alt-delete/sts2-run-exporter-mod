@@ -4,6 +4,8 @@ This file is the starting point for a new session. It records what exists, why
 it is shaped the way it is, what is planned next, and the domain knowledge that
 was expensive to work out. Read it instead of rediscovering all of this.
 
+For building, loading and verifying the mod, see [TESTING.md](TESTING.md).
+
 Repo: `DataExporter/` is its own git repository. The parent
 `slay-the-spire-mod/` directory is not a git repo and also holds the dashboard
 (`dashboard/`, its own repo `tim-alt-delete/sts2-run-data`) and the decompiled
@@ -289,6 +291,35 @@ Full resolved shape:
 user://{steam|editor|default}/{userId}/[modded/]profile{N}/saves/history/
 ```
 
+### "Save and Quit" does not save, and the game never saves in combat
+
+Two facts that together caused the first real bug found in play.
+
+`NPauseMenu.OnSaveAndQuitButtonPressed` (`:301-320`) calls `CloseToMenu()` →
+`NGame.ReturnToMainMenu()`. **No `SaveRun` anywhere in that path.** The button
+means "your run is already saved, quit safely", not "write a save now". It also
+returns to the menu rather than exiting, so the process — and every mod static —
+survives.
+
+`SaveManager.SaveRun` has exactly four call sites, none of them during combat:
+
+| Where | When |
+|---|---|
+| `Nodes.Screens.CharacterSelect/NCharacterSelectScreen.cs:750` | run starts |
+| `Runs/RunManager.cs:826` | travelling to a new map point |
+| `Rooms/EventRoom.cs:139` | event room resolves |
+| `Combat/CombatManager.cs:1009` | combat **ends** |
+
+And there is nowhere to put combat state even if it did save:
+`CombatRoom.ToSerializable` (`Rooms/CombatRoom.cs:160-178`) writes the encounter
+id, pre-finished flag, gold proportion, encounter custom state and extra
+rewards. No piles, no monster HP, no powers, no turn number.
+
+**Therefore a combat you quit out of always restarts from the beginning**, and
+anything the mod counted during the abandoned attempt must be thrown away or it
+is counted twice. This is why the tracker reloads from disk at the start of
+every combat rather than only when the run changes.
+
 ### Save, quit and resume destroys in-memory state
 
 `RunState.FromSerializable` (`Runs/RunState.cs:291`) → `Player.FromSerializable`
@@ -359,9 +390,13 @@ so multiplayer does not blend both players' cards.
 
 ### Phase 3 — the sidecar (done)
 
-Write `{start_time}.cardstats.json` into `saves/history/` after every combat,
-temp-file-then-rename so a crash cannot leave a half-parsed file. Reload on
-resume.
+Write `{start_time}.cardstats.json` into `saves/history/`, temp-file-then-rename
+so a crash cannot leave a half-parsed file.
+
+**Written when the game writes its own run save**, by subscribing to
+`SaveManager.Instance.Saved` (`Saves/SaveManager.cs:143`), which fires after
+that save reaches disk. Keeping the two files in step is the whole point: the
+sidecar then records exactly the combats the game itself considers committed.
 
 ```json
 {
@@ -396,29 +431,49 @@ happens at render, so a sidecar uploaded mid-run lights up later when its `.run`
 arrives rather than being rejected as an orphan. See `dashboard/docs/PLAN.md`
 phase 6.
 
-### Phase 5 — runtime verification (NOT DONE)
+### Phase 5 — runtime verification (partly done)
 
-**Nothing below has been observed in a running game.** Everything so far is
-static analysis plus a compile, which cannot tell you whether the hooks fire,
-whether the numbers are right, or whether the sidecar lands where intended.
+Confirmed in a real game on 2026-09-18: the mod loads, `ModelDb.Init`
+instantiates the tracker, hooks fire, `cardSource` is populated, and the sidecar
+lands in `saves/history/` under the `modded/` tree with correct numbers.
+`energy_spent` and `block_gained` reconciled exactly against the Ironclad
+basics.
 
-What has been verified:
+Note the mod does **not** appear in BaseLib's mod settings screen, which only
+lists mods that register configuration. That is not a failure signal; the log
+line and the sidecar are.
 
-- compiles clean against the real `sts2.dll` and `0Harmony.dll`
-- the accumulator and the wire format, exercised directly
-- the wire format the mod emits is accepted, stored and rendered by the
-  dashboard, joined against a real 33-card deck from an archived run
+Two bugs came out of that session, both fixed in `fix: discard card plays the
+game never committed`:
 
-What has not, and needs a real game:
+**Replayed card plays were counted twice.** `EnsureRun` only reloaded when
+`start_time` changed, so quitting to the menu mid-combat and resuming kept plays
+that had never been committed — and the game restarts that combat. Fixed by
+reloading from disk at the start of every combat. See the "Save and Quit" entry
+in Domain knowledge for why the combat restarts.
 
-1. `ModelDb.Init` actually instantiates `CardMetricsTracker` and BaseLib
-   registers it — the whole design rests on this
-2. hooks fire, and `AfterDamageGiven` carries a non-null `cardSource` for a
-   normal attack
-3. the sidecar appears in `saves/history/` under the `modded/` tree
-4. numbers match what the combat log showed
-5. `unattributed` stays 0 in a pure-attack fight and rises once Poison is used
-6. quitting mid-run and resuming keeps the totals
+**`complete` was never true.** `FlushRun` was only ever called with the default
+`complete = false`, so every sidecar claimed its run was unfinished. There is no
+run-end hook, so a Harmony postfix on `RunManager.OnEnded` now writes the final
+totals and marks them final. That also captures the fatal combat, which dying
+otherwise loses entirely: `CreatureCmd.Kill` reaches `OnEnded` with no
+intervening `SaveRun`.
+
+A third problem was found while fixing those, never observed in play: once a run
+is complete, starting the next one saves at character select
+(`NCharacterSelectScreen.cs:750`) and fires `Saved` while the tracker still
+points at the old run, reopening a finished file and marking it incomplete.
+`RunCardMetrics.IsComplete` makes a completed run refuse further writes.
+
+Still unverified, and needing another session:
+
+1. replaying a combat no longer inflates `copies_played` (the fix itself)
+2. a finished run writes `"complete": true`
+3. dying records the fatal combat
+4. `unattributed` stays 0 in a pure-attack fight and rises once Poison is used
+5. `cards_drawn` is attributed to the card that drew, not the start-of-turn hand
+
+`docs/TESTING.md` has these as a numbered checklist.
 
 ---
 
@@ -472,6 +527,17 @@ target. Easy fix, confusing symptom.
 Note this is a *path* problem, not an architecture problem: `sts2.dll` and
 `0Harmony.dll` are managed MSIL and compile fine from any host architecture.
 The csproj already suppresses `MSB3270` for exactly this reason.
+
+### Metrics are actual, not printed
+
+`damage_unblocked` is what the target really lost, after every modifier. A Bash
+played under Shrink records less than its printed 8, and a killing blow is
+clamped to the target's remaining HP with the remainder in `overkill`.
+
+This is deliberate. The question is "was this card good *for this run*", and the
+answer depends on what actually happened, not on the card's face value. Do not
+"fix" this into printed damage. Observed in play: 2 Bash plays reporting 10
+damage rather than 16, which was Shrink, not a bug.
 
 ### Multiplayer
 
