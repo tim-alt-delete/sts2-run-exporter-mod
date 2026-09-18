@@ -69,6 +69,16 @@ public sealed class RunCardMetrics
     /// <summary>The run's seed string, carried so the dashboard can sanity-check the join.</summary>
     public string? Seed { get; set; }
 
+    /// <summary>
+    /// Whether the run has ended.
+    ///
+    /// Once true the totals are final and must never be written again. The
+    /// game saves at the start of the *next* run while this object is still
+    /// the current one, and that write would otherwise reopen a finished run
+    /// and mark it incomplete.
+    /// </summary>
+    public bool IsComplete { get; set; }
+
     public Dictionary<CardKey, CardTotals> Cards { get; } = new();
 
     /// <summary>
@@ -98,6 +108,7 @@ public sealed class RunCardMetrics
         Cards.Clear();
         StartTime = 0;
         Seed = null;
+        IsComplete = false;
         Unattributed.CopiesPlayed = 0;
         Unattributed.DamageUnblocked = 0;
         Unattributed.DamageBlocked = 0;

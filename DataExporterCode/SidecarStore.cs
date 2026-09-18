@@ -54,6 +54,26 @@ public sealed class CardStatsEntry
 }
 
 /// <summary>
+/// What happened when a sidecar was read.
+///
+/// "Not there" and "could not be read" must not be collapsed into one result.
+/// The tracker reloads from disk at the start of every combat, so treating a
+/// transient read failure as "no data yet" would reset a run's totals to zero
+/// and the next flush would overwrite a perfectly good file with them.
+/// </summary>
+public enum LoadOutcome
+{
+    /// <summary>No sidecar exists. Correct for the first combat of a run.</summary>
+    Missing,
+
+    /// <summary>A sidecar was read and parsed.</summary>
+    Loaded,
+
+    /// <summary>A sidecar exists but could not be used. Keep whatever is in memory.</summary>
+    Failed,
+}
+
+/// <summary>
 /// Reads and writes the sidecar file that carries per-card metrics out of the
 /// game.
 ///
@@ -98,7 +118,7 @@ public static class SidecarStore
     /// Write the run's totals. Never throws: a failed write must not interrupt
     /// a run, and the data is re-derivable on the next flush anyway.
     /// </summary>
-    public static void Save(RunCardMetrics run, string modVersion, bool complete)
+    public static void Save(RunCardMetrics run, string modVersion)
     {
         if (run.StartTime <= 0)
         {
@@ -117,7 +137,7 @@ public static class SidecarStore
                 ModVersion = modVersion,
                 StartTime = run.StartTime,
                 Seed = run.Seed,
-                Complete = complete,
+                Complete = run.IsComplete,
                 Unattributed = ToEntry(new CardKey("", 0), run.Unattributed),
             };
             foreach (KeyValuePair<CardKey, CardTotals> pair in run.Cards)
@@ -152,19 +172,28 @@ public static class SidecarStore
     }
 
     /// <summary>
-    /// Recover totals for a run already in progress, or null if there are none.
+    /// Recover totals for a run already in progress.
     ///
-    /// Needed because resuming a saved run rebuilds the whole RunState from
-    /// disk and mints new CardModel objects, so anything held in memory is
-    /// gone. Without this, quitting to the menu mid-run would silently reset a
-    /// run's card stats to zero.
+    /// Called at the start of every combat, not just when the run changes.
+    /// Anything accumulated but not yet written is deliberately dropped: the
+    /// game restarts a combat you quit out of, and replaying it would otherwise
+    /// count those cards twice. Disk is the only committed state.
+    ///
+    /// Resuming also rebuilds the whole RunState from the save file and mints
+    /// new CardModel objects, so nothing in memory survives a real reload
+    /// anyway.
     /// </summary>
-    public static RunCardMetrics? Load(long startTime)
+    public static LoadOutcome Load(long startTime, out RunCardMetrics? run)
     {
+        run = null;
         string? path = PathFor(startTime);
-        if (path == null || !File.Exists(path))
+        if (path == null)
         {
-            return null;
+            return LoadOutcome.Failed;
+        }
+        if (!File.Exists(path))
+        {
+            return LoadOutcome.Missing;
         }
 
         try
@@ -172,21 +201,29 @@ public static class SidecarStore
             CardStatsFile? file = JsonSerializer.Deserialize<CardStatsFile>(File.ReadAllText(path));
             if (file == null || file.Schema != SchemaVersion || file.StartTime != startTime)
             {
-                return null;
+                MainFile.Logger.Error(
+                    $"[DataExporter] Ignoring unusable card stats at {path}.");
+                return LoadOutcome.Failed;
             }
 
-            var run = new RunCardMetrics { StartTime = file.StartTime, Seed = file.Seed };
+            var loaded = new RunCardMetrics
+            {
+                StartTime = file.StartTime,
+                Seed = file.Seed,
+                IsComplete = file.Complete,
+            };
             foreach (CardStatsEntry entry in file.Cards)
             {
-                Apply(entry, run.For(new CardKey(entry.Id, entry.UpgradeLevel)));
+                Apply(entry, loaded.For(new CardKey(entry.Id, entry.UpgradeLevel)));
             }
-            Apply(file.Unattributed, run.Unattributed);
-            return run;
+            Apply(file.Unattributed, loaded.Unattributed);
+            run = loaded;
+            return LoadOutcome.Loaded;
         }
         catch (Exception exception)
         {
             MainFile.Logger.Error($"[DataExporter] Could not load card stats: {exception}");
-            return null;
+            return LoadOutcome.Failed;
         }
     }
 

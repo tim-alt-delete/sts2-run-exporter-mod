@@ -253,8 +253,12 @@ public sealed class CardMetricsTracker : CustomSingletonModel
 
     public override Task AfterCombatEnd(CombatRoom room)
     {
+        // No flush here. The game saves the run a few lines after dispatching
+        // this hook (CombatManager.cs:985 then :1008), and writing first left a
+        // window where a crash in between committed a combat the game had not.
+        // MainFile flushes on SaveManager.Saved instead, so the two files move
+        // together.
         _inFlight.Clear();
-        MainFile.FlushRun(this);
         return Task.CompletedTask;
     }
 }

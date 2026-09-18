@@ -5,6 +5,7 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves;
 
 namespace DataExporter.DataExporterCode;
 
@@ -96,47 +97,153 @@ public partial class MainFile : Node
 
     // ---- orchestration -------------------------------------------------------
 
+    /// <summary>Whether the flush-on-save subscription has been made yet.</summary>
+    private static bool _subscribed;
+
     /// <summary>
-    /// Point the tracker at the run that is actually in progress, called at the
-    /// start of every combat.
+    /// Point the tracker at the run on disk, called at the start of every
+    /// combat.
     ///
-    /// Detecting the run here rather than on RunManager.RunStarted keeps this
-    /// independent of mod-init ordering, and covers the resume case: the
-    /// tracker is a ModelDb singleton created once at startup, so without this
-    /// it would happily carry one run's totals into the next.
+    /// Reloading unconditionally, rather than only when the run changes, is
+    /// what stops replayed cards being counted twice. "Save and Quit" does not
+    /// save -- it returns to the main menu without calling SaveRun
+    /// (NPauseMenu.cs:301) -- and it does not exit the process, so this
+    /// singleton's totals survive. The game then restores the run from the save
+    /// written when the map point was entered and restarts the combat. Any card
+    /// played before quitting was never committed, so it must be dropped, or
+    /// replaying the combat counts it a second time.
     /// </summary>
     public static void EnsureRun(CardMetricsTracker tracker)
     {
         long startTime = CurrentStartTime();
-        if (startTime <= 0 || tracker.Current.StartTime == startTime)
+        if (startTime <= 0)
         {
             return;
         }
 
-        // A sidecar already on disk means this run was resumed: quitting to the
-        // menu rebuilds RunState from the save file and drops everything held
-        // in memory, so the totals have to come back from the file.
-        RunCardMetrics run = SidecarStore.Load(startTime)
-                             ?? new RunCardMetrics { StartTime = startTime };
-        run.Seed ??= CurrentSeed();
-        tracker.BeginRun(run);
+        SubscribeToSaves(tracker);
+
+        switch (SidecarStore.Load(startTime, out RunCardMetrics? loaded))
+        {
+            case LoadOutcome.Loaded when loaded != null:
+                loaded.Seed ??= CurrentSeed();
+                tracker.BeginRun(loaded);
+                break;
+
+            case LoadOutcome.Missing:
+                // First combat of this run.
+                tracker.BeginRun(new RunCardMetrics { StartTime = startTime, Seed = CurrentSeed() });
+                break;
+
+            default:
+                // The file is there but unreadable. Keeping the totals already
+                // in memory risks counting a replayed combat twice; resetting
+                // them would have the next flush overwrite a good file with
+                // zeroes. Losing real data is the worse outcome, so only start
+                // fresh when this is plainly a different run.
+                if (tracker.Current.StartTime != startTime)
+                {
+                    tracker.BeginRun(new RunCardMetrics { StartTime = startTime, Seed = CurrentSeed() });
+                }
+                break;
+        }
     }
 
     /// <summary>
-    /// Persist after every combat.
+    /// Flush whenever the game commits its own run save.
     ///
-    /// Not once at run end, because there is no run-end hook, and because
-    /// abandoning from the main menu writes a .run without RunManager ever
-    /// being involved (NMainMenu.cs:749) — a run-end write would miss it
-    /// entirely. Flushing per combat also survives a crash or force-quit.
+    /// Keeping the two files in step is the point: the sidecar then records
+    /// exactly the runs and combats the game itself considers committed, so
+    /// neither can get ahead of the other. Flushing at combat end instead ran
+    /// 23 lines before the game's SaveRun (CombatManager.cs:985 vs :1008),
+    /// leaving a window where a crash committed a combat the game did not.
+    ///
+    /// Subscribed here rather than in Initialize because touching
+    /// SaveManager.Instance constructs it, which reaches into Steam and builds
+    /// the cloud save store (SaveManager.cs:200) -- not something to trigger
+    /// while mods are still loading.
     /// </summary>
-    public static void FlushRun(CardMetricsTracker tracker, bool complete = false)
+    private static void SubscribeToSaves(CardMetricsTracker tracker)
     {
-        if (!tracker.IsDirty && !complete)
+        if (_subscribed)
         {
             return;
         }
-        SidecarStore.Save(tracker.Current, ModVersion, complete);
+        try
+        {
+            SaveManager.Instance.Saved += () => FlushRun(tracker);
+            _subscribed = true;
+        }
+        catch (Exception exception)
+        {
+            Logger.Error($"[DataExporter] Could not subscribe to run saves: {exception}");
+        }
+    }
+
+    /// <summary>
+    /// Write the run's totals out, if there is anything new to write.
+    /// </summary>
+    public static void FlushRun(CardMetricsTracker tracker)
+    {
+        RunCardMetrics run = tracker.Current;
+        if (run.StartTime <= 0 || run.IsComplete || !tracker.IsDirty)
+        {
+            return;
+        }
+        SidecarStore.Save(run, ModVersion);
         tracker.MarkFlushed();
+    }
+
+    /// <summary>
+    /// The run is over: write the final totals and mark them final.
+    ///
+    /// Called from a postfix on RunManager.OnEnded, since no run-end hook
+    /// exists. That covers dying, which reaches OnEnded through
+    /// CreatureCmd.Kill without any SaveRun -- so without this the combat that
+    /// killed you is never written at all.
+    ///
+    /// Marking it complete also protects it. Starting the next run saves at
+    /// character select (NCharacterSelectScreen.cs:750) while this object is
+    /// still the current one, and that write would otherwise reopen a finished
+    /// run and label it unfinished.
+    /// </summary>
+    public static void CompleteRun(CardMetricsTracker tracker)
+    {
+        RunCardMetrics run = tracker.Current;
+        if (run.StartTime <= 0 || run.IsComplete)
+        {
+            // OnEnded is called twice on a win (RunManager.cs:1223 then via
+            // GuaranteeKillAllPlayers) and returns early the second time, but
+            // the postfix still runs.
+            return;
+        }
+        run.IsComplete = true;
+        SidecarStore.Save(run, ModVersion);
+        tracker.MarkFlushed();
+        Logger.Info($"[DataExporter] Run {run.StartTime} finished, {run.Cards.Count} cards recorded.");
+    }
+}
+
+/// <summary>
+/// Marks the run as finished when it ends.
+///
+/// A Harmony patch rather than a hook because the game has none for this:
+/// Hook.cs has no run-end entry and RunManager exposes only RunStarted,
+/// RoomEntered, RoomExited and ActEntered.
+/// </summary>
+[HarmonyPatch(typeof(RunManager), nameof(RunManager.OnEnded))]
+public static class RunEndedPatch
+{
+    private static void Postfix()
+    {
+        try
+        {
+            MainFile.CompleteRun(ModelDb.Singleton<CardMetricsTracker>());
+        }
+        catch (Exception exception)
+        {
+            // A patch that throws would take the end of the run with it.
+            MainFile.Logger.Error($"[DataExporter] Could not finalise card stats: {exception}");
+        }
     }
 }
