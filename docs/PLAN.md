@@ -44,7 +44,8 @@ design that research settled on; section 4 tracks what has actually shipped.
 ### Building
 
 Needs a real game install and the .NET SDK. Nothing about the build is
-Godot-editor-specific until you need the `.pck`.
+Godot-editor-specific until you need the `.pck`. A .NET 10 SDK builds the
+`net9.0` target fine (`apt install dotnet-sdk-10.0` on Ubuntu).
 
 ```
 dotnet build -c Release
@@ -71,8 +72,10 @@ in-game load.
 
 | | |
 |---|---|
-| `DataExporterCode/MainFile.cs` | `[ModInitializer]` entry point, Harmony setup, logger |
-| `DataExporterCode/RunStats.cs` | placeholder win/loss counter from the template |
+| `DataExporterCode/MainFile.cs` | `[ModInitializer]` entry point, run identity, flush orchestration |
+| `DataExporterCode/CardMetricsTracker.cs` | the hook listener that records everything |
+| `DataExporterCode/CardMetrics.cs` | `CardKey`, `CardTotals`, `RunCardMetrics` — the accumulator |
+| `DataExporterCode/SidecarStore.cs` | the JSON wire format, and reading/writing it |
 | `DataExporter.json` | mod manifest; declares the BaseLib dependency |
 | `DataExporter.csproj` | references `sts2.dll` + `0Harmony.dll`, pulls BaseLib from NuGet |
 | `sts2-decompiled/` | decompiled game source, gitignored, the authority for everything below |
@@ -344,7 +347,7 @@ Established that the feature is feasible without Harmony patching, that six of
 the seven needed hooks carry the causing card directly, and that BaseLib
 provides the exact base class for the job. All of section 3.
 
-### Phase 2 — the tracker (planned)
+### Phase 2 — the tracker (done)
 
 `CardMetricsTracker : CustomSingletonModel(HookType.Combat)` overriding
 `BeforeCardPlayed`, `AfterCardPlayed`, `AfterDamageGiven`, `AfterBlockGained`,
@@ -354,7 +357,7 @@ input unchanged — there is no `AfterEnergyGained`) and `AfterCombatEnd`.
 Filter to the local player via `LocalContext.GetMe` (`Context/LocalContext.cs:28`)
 so multiplayer does not blend both players' cards.
 
-### Phase 3 — the sidecar (planned)
+### Phase 3 — the sidecar (done)
 
 Write `{start_time}.cardstats.json` into `saves/history/` after every combat,
 temp-file-then-rename so a crash cannot leave a half-parsed file. Reload on
@@ -384,16 +387,38 @@ silently presenting partial totals as final.
 
 `unattributed` is what keeps the comparison honest — see the next section.
 
-### Phase 4 — dashboard ingest (planned)
+### Phase 4 — dashboard ingest (done, `7b25301` in `dashboard/`)
 
-In `dashboard/`: a `CARDSTATS_KIND` in `uploads.classify()` for
-`*.cardstats.json` (which currently returns `None` and is ignored, so the change
-is purely additive), a `validate_cardstats()`, a `card_stats` collection keyed
-`(user_id, start_time)` and upserted, and a sortable table on the existing run
-detail page.
+`uploads.classify()` gained `CARDSTATS_KIND`, matched before the `.run` suffix
+so a sidecar in the history folder is never taken for a run. `card_stats` is its
+own collection keyed `(user_id, start_time)` and replaced on re-upload. The join
+happens at render, so a sidecar uploaded mid-run lights up later when its `.run`
+arrives rather than being rejected as an orphan. See `dashboard/docs/PLAN.md`
+phase 6.
 
-Join at render, not at ingest: a sidecar uploaded mid-run arrives before its
-`.run` exists, and should light up later rather than be rejected as an orphan.
+### Phase 5 — runtime verification (NOT DONE)
+
+**Nothing below has been observed in a running game.** Everything so far is
+static analysis plus a compile, which cannot tell you whether the hooks fire,
+whether the numbers are right, or whether the sidecar lands where intended.
+
+What has been verified:
+
+- compiles clean against the real `sts2.dll` and `0Harmony.dll`
+- the accumulator and the wire format, exercised directly
+- the wire format the mod emits is accepted, stored and rendered by the
+  dashboard, joined against a real 33-card deck from an archived run
+
+What has not, and needs a real game:
+
+1. `ModelDb.Init` actually instantiates `CardMetricsTracker` and BaseLib
+   registers it — the whole design rests on this
+2. hooks fire, and `AfterDamageGiven` carries a non-null `cardSource` for a
+   normal attack
+3. the sidecar appears in `saves/history/` under the `modded/` tree
+4. numbers match what the combat log showed
+5. `unattributed` stays 0 in a pure-attack fight and rises once Poison is used
+6. quitting mid-run and resuming keeps the totals
 
 ---
 
@@ -452,6 +477,18 @@ The csproj already suppresses `MSB3270` for exactly this reason.
 
 Metrics are filtered to the local player. Recording both players, and the
 interaction between them, is untouched.
+
+One known rough edge: damage with no `cardSource` and no `dealer` (Poison) is
+counted as the local player's unattributed damage, because there is nothing to
+attribute it to. In multiplayer that will also catch the other player's poison.
+
+### The SDK glob compiles anything under the project directory
+
+`DataExporter.csproj` explicitly removes `sts2-decompiled/**` and `lib/**` from
+`Compile`. Without those lines the Godot SDK's `**/*.cs` glob pulls the entire
+decompiled game into the mod assembly, which fails with ~2185 errors that have
+nothing to do with your code. Anyone dropping another reference folder in here
+needs to add it to that ItemGroup too.
 
 ---
 
