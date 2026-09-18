@@ -4,7 +4,9 @@ How to build the mod, load it, confirm it is actually working, and get its data
 into the dashboard. The end-user section at the bottom is the short version for
 someone who just wants to use it.
 
-For *why* the mod is shaped the way it is, read `PLAN.md` instead.
+For *why* the mod is shaped the way it is, read [PLAN.md](PLAN.md). For the
+state model behind the save/reload behaviour these checks exercise, and the bugs
+that came out of getting it wrong, read [FINDINGS.md](FINDINGS.md).
 
 ---
 

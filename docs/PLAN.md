@@ -4,7 +4,13 @@ This file is the starting point for a new session. It records what exists, why
 it is shaped the way it is, what is planned next, and the domain knowledge that
 was expensive to work out. Read it instead of rediscovering all of this.
 
-For building, loading and verifying the mod, see [TESTING.md](TESTING.md).
+Two companion files:
+
+- [TESTING.md](TESTING.md) — building, loading, and the checks that establish
+  the mod is actually correct rather than merely running.
+- [FINDINGS.md](FINDINGS.md) — the state model the mod is built on, the bugs
+  that came from getting it wrong, and the rules that prevent the next one.
+  **Read this before changing when the mod reads or writes state.**
 
 Repo: `DataExporter/` is its own git repository. The parent
 `slay-the-spire-mod/` directory is not a git repo and also holds the dashboard
